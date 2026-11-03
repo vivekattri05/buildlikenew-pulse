@@ -1,0 +1,1290 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BuildLikeNew Pulse</title>
+<meta name="description" content="Daily NewsBreak traffic for BuildLikeNew: impressions, views, followers and engagement.">
+<meta name="robots" content="noindex">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%2338e1ff'/%3E%3Cstop offset='1' stop-color='%23a78bfa'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='8' fill='%23050816'/%3E%3Cpath d='M4 20h6l3-9 5 14 3-8h7' fill='none' stroke='url(%23g)' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+:root { --font-anthropic-sans: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif; --cds-dur-slow: .4s; }
+html, body { margin: 0; background: #050816; }
+.bl-refresh { font: inherit; color: inherit; background: none; border: 0; padding: 0; text-decoration: underline; cursor: pointer; }
+.bl-refresh:hover { color: #eef1ff; }
+</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+<script src="config.js"></script>
+<script>
+// Stand-in for the dashboard runtime: loads the Daily rows (Google Sheet first, bundled data.csv as backup),
+// runs the calculations, keeps the view settings in the URL, and redraws every [data-draw] element.
+window.dash = (() => {
+  const DEFAULTS = { period: 'last7', compare: 'prev', metric: 'views', grain: 'auto', start: null, end: null };
+  const calcs = [], draws = new Map(), listeners = [];
+  const store = { daily: { status: 'loading', data: null } };
+  let params = { ...DEFAULTS };
+  let lastText = null, source = null, loadedAt = null;
+
+  const readHash = () => {
+    try {
+      const q = new URLSearchParams(location.hash.slice(1));
+      const p = { ...DEFAULTS };
+      for (const k of Object.keys(DEFAULTS)) if (q.get(k)) p[k] = q.get(k);
+      return p;
+    } catch (e) { return { ...DEFAULTS }; }
+  };
+  const writeHash = () => {
+    const q = new URLSearchParams();
+    for (const [k, v] of Object.entries(params)) if (v != null && v !== DEFAULTS[k]) q.set(k, v);
+    const h = q.toString();
+    history.replaceState(null, '', h ? '#' + h : location.pathname + location.search);
+  };
+
+  const render = () => {
+    listeners.forEach((fn) => { try { fn(); } catch (e) { console.error(e); } });
+    document.querySelectorAll('[data-draw]').forEach((el) => {
+      const fn = draws.get(el.dataset.draw);
+      if (fn) { try { fn(el); } catch (e) { console.error('draw ' + el.dataset.draw, e); } }
+    });
+    const src = document.getElementById('bl-src');
+    if (src) {
+      const t = loadedAt ? loadedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+      src.textContent = store.daily.status === 'error' ? 'Could not load the data.'
+        : source === 'sheet' ? 'Live from the Google Sheet · checked ' + t
+        : source === 'file' ? 'From the saved copy (data.csv) · checked ' + t : 'Loading…';
+    }
+  };
+
+  const compute = () => {
+    for (const c of calcs) {
+      const ins = c.inputs.map((i) => store[i]);
+      if (ins.some((x) => !x || x.status !== 'ok')) { store[c.id] = { status: ins.some((x) => x && x.status === 'error') ? 'error' : 'loading', data: null }; continue; }
+      try { store[c.id] = { status: 'ok', data: c.fn(...ins.map((x) => x.data)) }; }
+      catch (e) { console.error('calc ' + c.id, e); store[c.id] = { status: 'error', data: null }; }
+    }
+  };
+
+  const fetchText = async (url) => {
+    const r = await fetch(url, { cache: 'no-store' });
+    if (!r.ok) throw new Error(url + ' ' + r.status);
+    const text = await r.text();
+    if (!/date/i.test(text.slice(0, 200))) throw new Error('no Date header in ' + url);
+    return text;
+  };
+
+  const load = async () => {
+    const cfg = window.BLN_CONFIG || {};
+    let text = null, from = null;
+    if (cfg.sheetCsv) {
+      try { text = await fetchText(cfg.sheetCsv + (cfg.sheetCsv.includes('?') ? '&' : '?') + '_=' + Date.now()); from = 'sheet'; }
+      catch (e) { console.warn('Sheet not reachable, using data.csv', e); }
+    }
+    if (!text) {
+      try { text = await fetchText('data.csv?_=' + Date.now()); from = 'file'; }
+      catch (e) { console.error(e); }
+    }
+    loadedAt = new Date();
+    if (!text) { if (store.daily.status !== 'ok') store.daily = { status: 'error', data: null }; compute(); render(); return; }
+    source = from;
+    if (text === lastText) { render(); return; }
+    lastText = text;
+    store.daily = { status: 'ok', data: d3.csvParse(text) };
+    compute();
+    render();
+  };
+
+  let resizeTimer = null;
+  const start = () => {
+    params = readHash();
+    render();
+    load();
+    setInterval(load, 5 * 60 * 1000);
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) load(); });
+    window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(render, 150); });
+    window.addEventListener('hashchange', () => { params = readHash(); render(); });
+    document.querySelectorAll('.bl-refresh').forEach((b) => b.addEventListener('click', () => { lastText = null; load(); }));
+  };
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start); else setTimeout(start);
+
+  return {
+    calc: (id, def) => calcs.push({ id, inputs: def.inputs || [], fn: def.fn }),
+    draw: (name, fn) => draws.set(name, fn),
+    data: (id) => store[id] || { status: 'loading', data: null },
+    params: () => ({ ...params }),
+    setParams: (p) => { params = { ...params, ...p }; writeHash(); render(); },
+    resetParams: () => { params = { ...DEFAULTS }; writeHash(); render(); },
+    onData: (fn) => listeners.push(fn),
+  };
+})();
+
+</script>
+</head>
+<body>
+<div id="dash-root">
+<style>
+/* Layout: one dark "aurora" stage, edge to edge. Hero (headline + funnel), sticky control dock, metric tiles, then charts in glass panels. Each metric owns a hue; the stage re-tints to the chosen metric. */
+@property --hue { syntax: '<color>'; inherits: true; initial-value: #38e1ff; }
+#dash-root { --dash-gutter: 0; }
+.bl {
+  --bg: #050816; --bg2: #0b1130; --ink: #eef1ff; --mute: #8d95bb; --faint: #5c6489;
+  --line: rgba(160, 170, 255, .13); --glass: rgba(255, 255, 255, .035);
+  --up: #34d399; --down: #fb7185; --hue: #38e1ff;
+  --r: 20px;
+  position: relative; isolation: isolate; overflow-x: clip;
+  background: radial-gradient(120% 80% at 50% -10%, var(--bg2) 0%, var(--bg) 60%) var(--bg);
+  color: var(--ink); color-scheme: dark;
+  font-family: var(--font-anthropic-sans);
+  padding-block: 28px 56px;
+  padding-left: max(16px, 3.2vw); padding-right: max(16px, 3.2vw);
+  display: grid; gap: 28px;
+  transition: --hue .9s ease;
+}
+.bl > * { min-width: 0; }
+.bl h1, .bl h2, .bl h3, .bl p { margin: 0; }
+.bl h2 { font-size: 15px; font-weight: 600; letter-spacing: .01em; text-wrap: balance; }
+.bl-eyebrow { font-size: 11px; letter-spacing: .18em; text-transform: uppercase; color: var(--mute); }
+.bl-muted { color: var(--mute); }
+
+/* Aurora */
+.bl-aurora { position: absolute; inset: -240px -10% auto -10%; height: 1100px; z-index: -1; pointer-events: none; filter: blur(80px) saturate(140%); opacity: .55; }
+.bl-aurora i { position: absolute; border-radius: 50%; mix-blend-mode: screen; }
+.bl-aurora .a1 { width: 620px; height: 620px; left: 2%; top: 60px; background: radial-gradient(circle, var(--hue) 0%, transparent 62%); }
+.bl-aurora .a2 { width: 560px; height: 560px; right: 4%; top: 0; background: radial-gradient(circle, #8b5cf6 0%, transparent 62%); }
+.bl-aurora .a3 { width: 520px; height: 520px; left: 38%; top: 280px; background: radial-gradient(circle, #ec4899 0%, transparent 60%); opacity: .55; }
+.bl-grid-bg { position: absolute; inset: 0 0 auto; height: 760px; z-index: -1; pointer-events: none;
+  background-image: linear-gradient(var(--line) 1px, transparent 1px), linear-gradient(90deg, var(--line) 1px, transparent 1px);
+  background-size: 44px 44px; -webkit-mask-image: radial-gradient(70% 60% at 50% 0%, #000 0%, transparent 75%); mask-image: radial-gradient(70% 60% at 50% 0%, #000 0%, transparent 75%); opacity: .45; }
+.bl-stars { position: absolute; inset: 0 0 auto; height: 520px; z-index: -1; pointer-events: none; }
+.bl-stars i { position: absolute; width: 3px; height: 3px; border-radius: 50%; background: #fff; box-shadow: 0 0 8px 2px rgba(255,255,255,.6); opacity: .5; }
+
+/* Hero */
+.bl-hero { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 32px; align-items: stretch; }
+@media (max-width: 900px) { .bl-hero { grid-template-columns: minmax(0, 1fr); } }
+.bl-brand { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.bl-logo { width: 38px; height: 38px; border-radius: 12px; display: grid; place-items: center; background: linear-gradient(135deg, var(--hue), #8b5cf6 60%, #ec4899); box-shadow: 0 0 30px -4px var(--hue); }
+.bl-logo svg { width: 20px; height: 20px; }
+.bl-title { font-size: clamp(26px, 3.4vw, 40px); font-weight: 600; letter-spacing: -.02em; line-height: 1.05; }
+.bl-title em { font-style: normal; background: linear-gradient(90deg, var(--ink), var(--hue)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.bl-live { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--mute); padding: 5px 11px; border: 1px solid var(--line); border-radius: 999px; background: var(--glass); }
+.bl-live b { color: var(--ink); font-weight: 600; }
+.bl-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--up); box-shadow: 0 0 0 0 rgba(52,211,153,.6); }
+.bl-headline { display: grid; gap: 10px; align-content: center; padding-block: 18px 6px; }
+.bl-big { font-size: clamp(56px, 9vw, 112px); line-height: .92; font-weight: 300; letter-spacing: -.045em; font-variant-numeric: tabular-nums;
+  background: linear-gradient(100deg, #fff 10%, var(--hue) 70%, #c4b5fd); -webkit-background-clip: text; background-clip: text; color: transparent; filter: drop-shadow(0 6px 40px color-mix(in srgb, var(--hue) 35%, transparent)); }
+.bl-bigrow { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px; font-size: 14px; color: var(--mute); }
+.bl-pill { display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; border-radius: 999px; font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; border: 1px solid transparent; }
+.bl-pill.bl-up { color: var(--up); background: rgba(52,211,153,.1); border-color: rgba(52,211,153,.25); }
+.bl-pill.bl-down { color: var(--down); background: rgba(251,113,133,.1); border-color: rgba(251,113,133,.25); }
+.bl-pill.bl-flat { color: var(--mute); background: var(--glass); border-color: var(--line); }
+.bl-pill.bl-up::before { content: "▲"; font-size: 9px; }
+.bl-pill.bl-down::before { content: "▼"; font-size: 9px; }
+.bl-take { font-size: 15px; color: var(--mute); max-width: 60ch; line-height: 1.55; }
+.bl-take b { color: var(--ink); font-weight: 600; }
+
+/* Glass panel */
+.bl-glass { position: relative; background: linear-gradient(180deg, rgba(255,255,255,.065), rgba(255,255,255,.015)); border: 1px solid var(--line); border-radius: var(--r);
+  -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px); box-shadow: inset 0 1px 0 rgba(255,255,255,.07), 0 30px 60px -40px rgba(0,0,0,.9); }
+.bl-panel { padding: 22px; display: grid; gap: 14px; align-content: start; min-width: 0; }
+.bl-phead { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 10px 16px; }
+.bl-phead > div { display: grid; gap: 4px; min-width: 0; }
+.bl-note { font-size: 12.5px; color: var(--mute); line-height: 1.5; }
+
+/* Funnel */
+.bl-funnel { padding: 22px; display: grid; gap: 6px; align-content: center; }
+.bl-stage { position: relative; margin-inline: auto; width: var(--w); min-height: 58px; padding: 10px 18px; display: flex; align-items: center; justify-content: space-between; gap: 10px; border-radius: 14px; overflow: hidden;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--c) 34%, transparent), color-mix(in srgb, var(--c) 12%, transparent)); border: 1px solid color-mix(in srgb, var(--c) 45%, transparent); }
+.bl-stage::after { content: ""; position: absolute; inset: 0; background: linear-gradient(100deg, transparent 30%, rgba(255,255,255,.16) 50%, transparent 70%); transform: translateX(-100%); }
+.bl-stage span:first-child { font-size: 12px; color: #dfe3ff; letter-spacing: .02em; }
+.bl-stage .v { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.bl-flow { text-align: center; font-size: 11.5px; color: var(--mute); display: flex; align-items: center; justify-content: center; gap: 6px; }
+.bl-flow b { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+.bl-flow::before { content: ""; width: 1px; height: 12px; background: linear-gradient(var(--line), var(--hue)); }
+
+/* Dock */
+.bl-dock { position: sticky; top: 8px; z-index: 5; padding: 10px; display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; border-radius: 18px; background: rgba(8, 12, 32, .72); }
+.bl-seg { position: relative; display: flex; gap: 2px; padding: 3px; border-radius: 12px; background: rgba(255,255,255,.04); border: 1px solid var(--line); overflow-x: auto; scrollbar-width: none; max-width: 100%; }
+.bl-seg::-webkit-scrollbar { display: none; }
+.bl-ind { position: absolute; top: 3px; bottom: 3px; left: 0; width: 0; border-radius: 9px; background: linear-gradient(135deg, color-mix(in srgb, var(--hue) 55%, #1b2350), color-mix(in srgb, var(--hue) 25%, #1b2350)); box-shadow: 0 0 18px -4px var(--hue), inset 0 1px 0 rgba(255,255,255,.18); transition: left .35s cubic-bezier(.2,.8,.2,1), width .35s cubic-bezier(.2,.8,.2,1); z-index: 0; }
+.bl-seg button { position: relative; z-index: 1; font: inherit; font-size: 12.5px; padding: 7px 12px; border: 0; border-radius: 9px; background: transparent; color: var(--mute); cursor: pointer; white-space: nowrap; transition: color .2s; }
+.bl-seg button:hover { color: var(--ink); }
+.bl-seg button.is-on { color: #fff; font-weight: 600; }
+.bl-custom { display: flex; flex-wrap: wrap; gap: 8px; }
+.bl-custom label { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--mute); }
+.bl-custom input { font: inherit; font-size: 12.5px; color: var(--ink); background: rgba(255,255,255,.05); border: 1px solid var(--line); border-radius: 9px; padding: 6px 8px; color-scheme: dark; }
+.bl-range { display: grid; gap: 1px; font-size: 12px; color: var(--mute); margin-left: auto; }
+.bl-range b { color: var(--ink); font-weight: 600; }
+.bl-reset { font: inherit; font-size: 12px; color: var(--mute); background: transparent; border: 1px solid var(--line); border-radius: 9px; padding: 7px 10px; cursor: pointer; }
+.bl-reset:hover { color: var(--ink); border-color: var(--hue); }
+.bl button:focus-visible, .bl input:focus-visible { outline: 2px solid var(--hue); outline-offset: 2px; }
+
+/* Tiles */
+.bl-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 200px), 1fr)); gap: 14px; }
+.bl-tile { --c: var(--hue); position: relative; overflow: hidden; font: inherit; text-align: left; color: var(--ink); cursor: pointer; padding: 16px 16px 12px; display: grid; gap: 6px; align-content: start;
+  transition: transform .35s cubic-bezier(.2,.8,.2,1), border-color .3s, box-shadow .3s; }
+.bl-tile::before { content: ""; position: absolute; inset: -40% -40% auto auto; width: 160px; height: 160px; border-radius: 50%; background: radial-gradient(circle, color-mix(in srgb, var(--c) 40%, transparent), transparent 65%); opacity: .35; transition: opacity .3s; pointer-events: none; }
+.bl-tile:hover { transform: translateY(-4px); border-color: color-mix(in srgb, var(--c) 55%, transparent); }
+.bl-tile:hover::before { opacity: .7; }
+.bl-tile.is-on { border-color: var(--c); box-shadow: 0 0 0 1px var(--c), 0 18px 50px -18px color-mix(in srgb, var(--c) 70%, transparent); }
+.bl-tile.is-on::before { opacity: .9; }
+.t-top { display: flex; align-items: center; gap: 9px; }
+.t-ico { width: 28px; height: 28px; border-radius: 9px; display: grid; place-items: center; background: color-mix(in srgb, var(--c) 18%, transparent); color: var(--c); border: 1px solid color-mix(in srgb, var(--c) 35%, transparent); }
+.t-ico svg { width: 15px; height: 15px; }
+.t-label { font-size: 12.5px; color: var(--mute); }
+.t-val { font-size: 30px; font-weight: 600; letter-spacing: -.02em; font-variant-numeric: tabular-nums; line-height: 1.1; }
+.t-sub { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; font-size: 11.5px; color: var(--faint); font-variant-numeric: tabular-nums; }
+.t-sub .bl-pill { padding: 2px 8px; font-size: 11.5px; }
+.t-avg { font-size: 11.5px; color: var(--faint); font-variant-numeric: tabular-nums; }
+.t-avg span { color: var(--mute); }
+.t-spark { display: block; height: 38px; margin: 2px -16px -12px; }
+.t-spark svg { display: block; width: 100%; height: 38px; }
+
+/* Insight chips */
+.bl-chips { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr)); gap: 14px; }
+.bl-chip { padding: 14px 16px; display: grid; gap: 4px; }
+.bl-chip .k { font-size: 11px; letter-spacing: .14em; text-transform: uppercase; color: var(--faint); }
+.bl-chip .v { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.bl-chip .s { font-size: 12px; color: var(--mute); }
+
+.bl-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); gap: 14px; }
+.bl-chart { position: relative; min-height: 320px; }
+.bl-chart.sm { min-height: 280px; }
+.bl-chart svg { display: block; overflow: visible; }
+.bl-legend { display: flex; flex-wrap: wrap; gap: 16px; font-size: 12px; color: var(--mute); }
+.bl-key { display: inline-flex; align-items: center; gap: 7px; }
+.bl-key i { width: 18px; height: 0; display: inline-block; border-top: 3px solid var(--hue); border-radius: 2px; box-shadow: 0 0 10px var(--hue); }
+.bl-key i.prev { border-top: 2px dashed #7d86b8; box-shadow: none; }
+.bl-cal { overflow-x: auto; min-height: 190px; scrollbar-width: thin; }
+.bl-cal svg { display: block; }
+.bl-radial { position: relative; min-height: 300px; display: grid; place-items: center; }
+
+/* Tooltip */
+.bl-tip { position: absolute; z-index: 4; pointer-events: none; padding: 9px 12px; border-radius: 12px; font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums;
+  background: rgba(12, 16, 40, .92); border: 1px solid rgba(160,170,255,.22); box-shadow: 0 20px 40px -12px rgba(0,0,0,.8), 0 0 24px -10px var(--hue); color: var(--ink); }
+.bl-tip .d { color: var(--mute); margin-bottom: 4px; }
+.bl-tip .r { display: flex; align-items: center; gap: 7px; }
+.bl-tip .r b { margin-left: auto; padding-left: 12px; }
+.bl-tip .sw { width: 8px; height: 8px; border-radius: 2px; }
+
+/* Tables */
+.bl-scroll { overflow: auto; max-height: 480px; border-radius: 14px; border: 1px solid var(--line); }
+.bl-table { width: 100%; border-collapse: collapse; font-size: 12.5px; font-variant-numeric: tabular-nums; }
+.bl-table th, .bl-table td { padding: 9px 12px; text-align: right; white-space: nowrap; border-bottom: 1px solid rgba(160,170,255,.08); }
+.bl-table th:first-child, .bl-table td:first-child { text-align: left; }
+.bl-table th { position: sticky; top: 0; z-index: 1; background: #0d1230; color: var(--mute); font-weight: 600; font-size: 11.5px; letter-spacing: .03em; }
+.bl-table tbody tr { cursor: pointer; transition: background .2s; }
+.bl-table tbody tr:hover { background: rgba(255,255,255,.04); }
+.bl-table tr.is-on td { background: color-mix(in srgb, var(--hue) 12%, transparent); }
+.bl-table tr.is-on td:first-child { box-shadow: inset 3px 0 0 var(--hue); }
+.bl-tag { margin-left: 8px; font-size: 10.5px; color: var(--faint); border: 1px solid var(--line); border-radius: 999px; padding: 1px 7px; }
+.bl-up { color: var(--up); }
+.bl-down { color: var(--down); }
+.bl-flat { color: var(--mute); }
+
+/* Leaderboard */
+.bl-board table { width: 100%; border-collapse: separate; border-spacing: 0 6px; font-size: 13px; font-variant-numeric: tabular-nums; }
+.bl-board th { text-align: left; font-size: 11px; font-weight: 500; color: var(--faint); letter-spacing: .1em; text-transform: uppercase; padding: 0 10px 4px; }
+.bl-board th:last-child, .bl-board td:last-child { text-align: right; }
+.bl-board td { padding: 10px; background: rgba(255,255,255,.03); }
+.bl-board td:first-child { border-radius: 12px 0 0 12px; }
+.bl-board td:last-child { border-radius: 0 12px 12px 0; font-weight: 600; }
+.bl-rank { display: inline-grid; place-items: center; width: 24px; height: 24px; margin-right: 10px; border-radius: 8px; font-size: 11.5px; font-weight: 700; background: rgba(255,255,255,.06); color: var(--mute); }
+.bl-rank.g1 { background: linear-gradient(135deg, #fde68a, #f59e0b); color: #2a1a00; box-shadow: 0 0 16px -2px #f59e0b; }
+.bl-rank.g2 { background: linear-gradient(135deg, #e5e7eb, #9ca3af); color: #111; }
+.bl-rank.g3 { background: linear-gradient(135deg, #fdba74, #c2410c); color: #200800; }
+.bl-bar { height: 6px; border-radius: 4px; background: linear-gradient(90deg, var(--hue), color-mix(in srgb, var(--hue) 40%, #8b5cf6)); box-shadow: 0 0 12px -2px var(--hue); margin-top: 6px; }
+
+.bl-defs { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr)); gap: 12px 24px; font-size: 12.5px; margin: 0; }
+.bl-defs dt { font-weight: 600; margin-bottom: 2px; }
+.bl-defs dd { margin: 0; color: var(--mute); line-height: 1.5; }
+.bl-foot { font-size: 11.5px; color: var(--faint); text-align: center; }
+.bl-fail { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: inherit; color: var(--mute); font-size: 12px; }
+.bl-fail::before { content: ""; width: .375rem; height: .375rem; border-radius: 50%; background: var(--down); }
+.bl [data-dash-source-state=empty] { color: transparent; }
+.bl [data-dash-source-state=refreshing] { opacity: .5; transition: opacity var(--cds-dur-slow); }
+
+@media (prefers-reduced-motion: no-preference) {
+  .bl-aurora .a1 { animation: bl-drift1 24s ease-in-out infinite alternate; }
+  .bl-aurora .a2 { animation: bl-drift2 30s ease-in-out infinite alternate; }
+  .bl-aurora .a3 { animation: bl-drift3 27s ease-in-out infinite alternate; }
+  .bl-stars i { animation: bl-twinkle 4s ease-in-out infinite; }
+  .bl-dot { animation: bl-ping 2s ease-out infinite; }
+  .bl-stage::after { animation: bl-shine 4.5s ease-in-out infinite; }
+  .bl-stage:nth-child(3)::after { animation-delay: .5s; }
+  .bl-stage:nth-child(5)::after { animation-delay: 1s; }
+  .bl-stage:nth-child(7)::after { animation-delay: 1.5s; }
+  .bl-rise { animation: bl-rise .8s cubic-bezier(.2,.8,.2,1) both; }
+  .bl-tiles > :nth-child(2) { animation-delay: .04s; } .bl-tiles > :nth-child(3) { animation-delay: .08s; }
+  .bl-tiles > :nth-child(4) { animation-delay: .12s; } .bl-tiles > :nth-child(5) { animation-delay: .16s; }
+  .bl-tiles > :nth-child(6) { animation-delay: .2s; } .bl-tiles > :nth-child(7) { animation-delay: .24s; }
+  .bl-tiles > :nth-child(8) { animation-delay: .28s; } .bl-tiles > :nth-child(9) { animation-delay: .32s; }
+  .bl-logo { animation: bl-glow 5s ease-in-out infinite; }
+}
+@keyframes bl-drift1 { to { transform: translate(140px, 90px) scale(1.15); } }
+@keyframes bl-drift2 { to { transform: translate(-160px, 120px) scale(.9); } }
+@keyframes bl-drift3 { to { transform: translate(120px, -80px) scale(1.2); } }
+@keyframes bl-twinkle { 0%, 100% { opacity: .15; transform: scale(.6); } 50% { opacity: .9; transform: scale(1.1); } }
+@keyframes bl-ping { 0% { box-shadow: 0 0 0 0 rgba(52,211,153,.6); } 100% { box-shadow: 0 0 0 10px rgba(52,211,153,0); } }
+@keyframes bl-shine { 0%, 55% { transform: translateX(-100%); } 85%, 100% { transform: translateX(100%); } }
+@keyframes bl-rise { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
+@keyframes bl-glow { 0%, 100% { box-shadow: 0 0 24px -6px var(--hue); } 50% { box-shadow: 0 0 40px 0 var(--hue); } }
+</style>
+
+<div class="bl" id="overview">
+  <div class="bl-aurora" aria-hidden="true"><i class="a1"></i><i class="a2"></i><i class="a3"></i></div>
+  <div class="bl-grid-bg" aria-hidden="true"></div>
+  <div class="bl-stars" aria-hidden="true">
+    <i style="left:8%;top:60px"></i><i style="left:22%;top:210px;animation-delay:1.2s"></i><i style="left:41%;top:40px;animation-delay:2.1s"></i>
+    <i style="left:57%;top:170px;animation-delay:.6s"></i><i style="left:73%;top:80px;animation-delay:2.8s"></i><i style="left:88%;top:240px;animation-delay:1.7s"></i>
+    <i style="left:94%;top:30px;animation-delay:3.3s"></i><i style="left:33%;top:330px;animation-delay:.9s"></i><i style="left:66%;top:360px;animation-delay:2.4s"></i>
+  </div>
+
+  <header class="bl-hero">
+    <div class="bl-headline bl-rise">
+      <div class="bl-brand">
+        <span class="bl-logo" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11.5 12 4l9 7.5"/><path d="M5.5 10v9.5h13V10"/><path d="M10 19.5v-5h4v5"/></svg></span>
+        <h1 class="bl-title">BuildLikeNew <em>Pulse</em></h1>
+      </div>
+      <div class="bl-brand">
+        <span class="bl-live"><span class="bl-dot"></span>NewsBreak daily data to <b data-draw="latest" data-source="clean">—</b></span>
+      </div>
+      <p class="bl-eyebrow" style="margin-top:18px"><span data-draw="tk-metric">—</span> · <span data-draw="range" data-source="summary">—</span></p>
+      <div class="bl-big" data-draw="tk-val" data-source="summary clean">—</div>
+      <div class="bl-bigrow">
+        <span class="bl-pill bl-flat" data-draw="tk-chg" data-source="summary clean">—</span>
+        <span class="bl-cmp-line">vs <b data-draw="tk-prev" data-source="summary clean">—</b> in <span data-draw="range-cmp" data-source="summary">—</span></span>
+      </div>
+      <p class="bl-take">Click any tile below to put a different metric here. Every chart on the page follows the period and comparison you pick in the bar.</p>
+    </div>
+
+    <section class="bl-glass bl-funnel bl-rise" id="funnel" aria-label="Reader funnel" data-source="summary clean">
+      <div class="bl-phead" style="margin-bottom:8px"><div><span class="bl-eyebrow">Reader funnel</span><h2>From a card in the feed to a new follower</h2></div></div>
+      <div class="bl-stage" style="--w:100%;--c:#a78bfa"><span>Impressions</span><span class="v" data-draw="kpi-val" data-metric="impressions">—</span></div>
+      <div class="bl-flow"><b data-draw="ratio" data-num="views" data-den="impressions">—</b> opened the story</div>
+      <div class="bl-stage" style="--w:82%;--c:#38e1ff"><span>Views</span><span class="v" data-draw="kpi-val" data-metric="views">—</span></div>
+      <div class="bl-flow"><b data-draw="ratio" data-num="engagement" data-den="views">—</b> of views liked, shared or commented</div>
+      <div class="bl-stage" style="--w:64%;--c:#fb923c"><span>Engagement</span><span class="v" data-draw="kpi-val" data-metric="engagement">—</span></div>
+      <div class="bl-flow"><b data-draw="ratio" data-num="followers" data-den="views">—</b> of views became a follower</div>
+      <div class="bl-stage" style="--w:46%;--c:#fbbf24"><span>New followers</span><span class="v" data-draw="kpi-val" data-metric="followers">—</span></div>
+    </section>
+  </header>
+
+  <div class="bl-dock bl-glass" role="group" aria-label="Period and comparison">
+    <div class="bl-seg" id="period" role="group" aria-label="Period">
+      <span class="bl-ind" aria-hidden="true"></span>
+      <button type="button" data-period="latest" aria-pressed="false">Latest day</button>
+      <button type="button" data-period="last2" aria-pressed="false">2 days</button>
+      <button type="button" data-period="last7" aria-pressed="false">7 days</button>
+      <button type="button" data-period="last14" aria-pressed="false">14 days</button>
+      <button type="button" data-period="last30" aria-pressed="false">30 days</button>
+      <button type="button" data-period="last90" aria-pressed="false">90 days</button>
+      <button type="button" data-period="mtd" aria-pressed="false">This month</button>
+      <button type="button" data-period="lastmonth" aria-pressed="false">Last month</button>
+      <button type="button" data-period="ytd" aria-pressed="false">This year</button>
+      <button type="button" data-period="all" aria-pressed="false">All time</button>
+      <button type="button" data-period="custom" aria-pressed="false">Custom</button>
+    </div>
+    <div class="bl-seg" id="compare" role="group" aria-label="Compare with">
+      <span class="bl-ind" aria-hidden="true"></span>
+      <button type="button" data-compare="prev" aria-pressed="false">vs period before</button>
+      <button type="button" data-compare="yoy" aria-pressed="false">vs last year</button>
+      <button type="button" data-compare="none" aria-pressed="false">No compare</button>
+    </div>
+    <div class="bl-custom" hidden>
+      <label for="bl-start">From <input id="bl-start" type="date" min="2025-01-01" max="2099-12-31"></label>
+      <label for="bl-end">To <input id="bl-end" type="date" min="2025-01-01" max="2099-12-31"></label>
+    </div>
+    <p class="bl-range"><span>Showing <b data-draw="range" data-source="summary">—</b></span><span class="bl-cmp-line">Compared with <span data-draw="range-cmp" data-source="summary">—</span></span></p>
+    <button type="button" class="bl-reset">Reset</button>
+  </div>
+
+  <section class="bl-tiles" id="metrics" aria-label="Totals for the period">
+    <button type="button" class="bl-tile bl-glass bl-rise" style="--c:#a78bfa" data-metric="impressions" data-source="summary clean" aria-pressed="false">
+      <span class="t-top"><span class="t-ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg></span><span class="t-label">Impressions</span></span>
+      <span class="t-val" data-draw="kpi-val" data-metric="impressions">—</span>
+      <span class="t-sub"><span data-draw="kpi-chg" data-metric="impressions">—</span> vs <span data-draw="kpi-prev" data-metric="impressions">—</span></span>
+      <span class="t-avg"><span data-draw="kpi-avg" data-metric="impressions">—</span> per day</span>
+      <span class="t-spark" data-draw="kpi-spark" data-metric="impressions"></span>
+    </button>
+    <button type="button" class="bl-tile bl-glass bl-rise" style="--c:#38e1ff" data-metric="views" data-source="summary clean" aria-pressed="false">
+      <span class="t-top"><span class="t-ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h12l4 4v12H4z"/><path d="M8 11h8M8 15h6"/></svg></span><span class="t-label">Views</span></span>
+      <span class="t-val" data-draw="kpi-val" data-metric="views">—</span>
+      <span class="t-sub"><span data-draw="kpi-chg" data-metric="views">—</span> vs <span data-draw="kpi-prev" data-metric="views">—</span></span>
+      <span class="t-avg"><span data-draw="kpi-avg" data-metric="views">—</span> per day</span>
+      <span class="t-spark" data-draw="kpi-spark" data-metric="views"></span>
+    </button>
+    <button type="button" class="bl-tile bl-glass bl-rise" style="--c:#2dd4bf" data-metric="native_views" data-source="summary clean" aria-pressed="false">
+      <span class="t-top"><span class="t-ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="2.5" width="12" height="19" rx="3"/><path d="M11 18h2"/></svg></span><span class="t-label">Native views</span></span>
+      <span class="t-val" data-draw="kpi-val" data-metric="native_views">—</span>
+      <span class="t-sub"><span data-draw="kpi-chg" data-metric="native_views">—</span> vs <span data-draw="kpi-prev" data-metric="native_views">—</span></span>
+      <span class="t-avg"><span data-draw="kpi-avg" data-metric="native_views">—</span> per day</span>
+      <span class="t-spark" data-draw="kpi-spark" data-metric="native_views"></span>
+    </button>
+    <button type="button" class="bl-tile bl-glass bl-rise" style="--c:#fbbf24" data-metric="followers" data-source="summary clean" aria-pressed="false">
+      <span class="t-top"><span class="t-ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="4"/><path d="M2 21c0-3.9 3.1-7 7-7s7 3.1 7 7"/><path d="M19 8v6M16 11h6"/></svg></span><span class="t-label">New followers</span></span>
+      <span class="t-val" data-draw="kpi-val" data-metric="followers">—</span>
+      <span class="t-sub"><span data-draw="kpi-chg" data-metric="followers">—</span> vs <span data-draw="kpi-prev" data-metric="followers">—</span></span>
+      <span class="t-avg"><span data-draw="kpi-avg" data-metric="followers">—</span> per day</span>
+      <span class="t-spark" data-draw="kpi-spark" data-metric="followers"></span>
+    </button>
+    <button type="button" class="bl-tile bl-glass bl-rise" style="--c:#f472b6" data-metric="shares" data-source="summary clean" aria-pressed="false">
+      <span class="t-top"><span class="t-ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.6 13.5 6.8 4M15.4 6.5l-6.8 4"/></svg></span><span class="t-label">Shares</span></span>
+      <span class="t-val" data-draw="kpi-val" data-metric="shares">—</span>
+      <span class="t-sub"><span data-draw="kpi-chg" data-metric="shares">—</span> vs <span data-draw="kpi-prev" data-metric="shares">—</span></span>
+      <span class="t-avg"><span data-draw="kpi-avg" data-metric="shares">—</span> per day</span>
+      <span class="t-spark" data-draw="kpi-spark" data-metric="shares"></span>
+    </button>
+    <button type="button" class="bl-tile bl-glass bl-rise" style="--c:#fb7185" data-metric="likes" data-source="summary clean" aria-pressed="false">
+      <span class="t-top"><span class="t-ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s-8-5.2-8-11a4.5 4.5 0 0 1 8-2.8A4.5 4.5 0 0 1 20 10c0 5.8-8 11-8 11z"/></svg></span><span class="t-label">Likes</span></span>
+      <span class="t-val" data-draw="kpi-val" data-metric="likes">—</span>
+      <span class="t-sub"><span data-draw="kpi-chg" data-metric="likes">—</span> vs <span data-draw="kpi-prev" data-metric="likes">—</span></span>
+      <span class="t-avg"><span data-draw="kpi-avg" data-metric="likes">—</span> per day</span>
+      <span class="t-spark" data-draw="kpi-spark" data-metric="likes"></span>
+    </button>
+    <button type="button" class="bl-tile bl-glass bl-rise" style="--c:#a3e635" data-metric="comments" data-source="summary clean" aria-pressed="false">
+      <span class="t-top"><span class="t-ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z"/></svg></span><span class="t-label">Comments</span></span>
+      <span class="t-val" data-draw="kpi-val" data-metric="comments">—</span>
+      <span class="t-sub"><span data-draw="kpi-chg" data-metric="comments">—</span> vs <span data-draw="kpi-prev" data-metric="comments">—</span></span>
+      <span class="t-avg"><span data-draw="kpi-avg" data-metric="comments">—</span> per day</span>
+      <span class="t-spark" data-draw="kpi-spark" data-metric="comments"></span>
+    </button>
+    <button type="button" class="bl-tile bl-glass bl-rise" style="--c:#fb923c" data-metric="engagement" data-source="summary clean" aria-pressed="false">
+      <span class="t-top"><span class="t-ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></svg></span><span class="t-label">Engagement</span></span>
+      <span class="t-val" data-draw="kpi-val" data-metric="engagement">—</span>
+      <span class="t-sub"><span data-draw="kpi-chg" data-metric="engagement">—</span> vs <span data-draw="kpi-prev" data-metric="engagement">—</span></span>
+      <span class="t-avg"><span data-draw="kpi-avg" data-metric="engagement">—</span> per day</span>
+      <span class="t-spark" data-draw="kpi-spark" data-metric="engagement"></span>
+    </button>
+    <button type="button" class="bl-tile bl-glass bl-rise" style="--c:#60a5fa" data-metric="view_rate" data-source="summary clean" aria-pressed="false">
+      <span class="t-top"><span class="t-ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.5"/></svg></span><span class="t-label">View rate</span></span>
+      <span class="t-val" data-draw="kpi-val" data-metric="view_rate">—</span>
+      <span class="t-sub"><span data-draw="kpi-chg" data-metric="view_rate">—</span> vs <span data-draw="kpi-prev" data-metric="view_rate">—</span></span>
+      <span class="t-avg">views ÷ impressions</span>
+      <span class="t-spark" data-draw="kpi-spark" data-metric="view_rate"></span>
+    </button>
+  </section>
+
+  <section class="bl-chips" id="insights" aria-label="Highlights">
+    <div class="bl-glass bl-chip bl-rise"><span class="k">Best day</span><span class="v" data-draw="best-val" data-source="clean summary">—</span><span class="s" data-draw="best-day">—</span></div>
+    <div class="bl-glass bl-chip bl-rise"><span class="k">Daily average</span><span class="v" data-draw="avg-val" data-source="summary clean">—</span><span class="s"><span data-draw="metric-name" data-case="lower">—</span> per day in this period</span></div>
+    <div class="bl-glass bl-chip bl-rise"><span class="k">Strongest weekday</span><span class="v" data-draw="wd-best" data-source="clean summary">—</span><span class="s" data-draw="wd-note">—</span></div>
+    <div class="bl-glass bl-chip bl-rise"><span class="k">Days in view</span><span class="v" data-draw="days" data-source="summary">—</span><span class="s">days of data in the period</span></div>
+  </section>
+
+  <section class="bl-glass bl-panel" id="trend">
+    <div class="bl-phead">
+      <div><span class="bl-eyebrow">Trend</span><h2><span data-draw="metric-name">—</span> over time</h2></div>
+      <div class="bl-seg" id="grain" role="group" aria-label="Group by">
+        <span class="bl-ind" aria-hidden="true"></span>
+        <button type="button" data-grain="auto" aria-pressed="false">Auto</button>
+        <button type="button" data-grain="day" aria-pressed="false">Day</button>
+        <button type="button" data-grain="week" aria-pressed="false">Week</button>
+        <button type="button" data-grain="month" aria-pressed="false">Month</button>
+      </div>
+    </div>
+    <p class="bl-legend"><span class="bl-key"><i></i>Selected period</span><span class="bl-key bl-cmp-line"><i class="prev"></i>Comparison, lined up step by step</span></p>
+    <div class="bl-chart" data-draw="trend" data-source="clean summary"></div>
+  </section>
+
+  <section class="bl-glass bl-panel" id="calendar">
+    <div class="bl-phead"><div><span class="bl-eyebrow">Every day since launch</span><h2><span data-draw="metric-name">—</span> heatmap</h2></div>
+      <p class="bl-note">Brighter = more. The selected period stays lit; click any day to open just that day.</p></div>
+    <div class="bl-cal" data-draw="calendar" data-source="clean summary"></div>
+  </section>
+
+  <div class="bl-row">
+    <section class="bl-glass bl-panel" id="weekday">
+      <div class="bl-phead"><div><span class="bl-eyebrow">Rhythm</span><h2>Average <span data-draw="metric-name" data-case="lower">—</span> by weekday</h2></div></div>
+      <p class="bl-note">Each petal is the average day for that weekday inside the selected period.</p>
+      <div class="bl-radial" data-draw="radial" data-source="clean summary"></div>
+    </section>
+    <section class="bl-glass bl-panel" id="top-days">
+      <div class="bl-phead"><div><span class="bl-eyebrow">Leaderboard</span><h2>Top 10 days by <span data-draw="metric-name" data-case="lower">—</span></h2></div></div>
+      <div class="bl-board" data-draw="board" data-source="clean summary"></div>
+    </section>
+  </div>
+
+  <section class="bl-glass bl-panel" id="compare-table">
+    <div class="bl-phead"><div><span class="bl-eyebrow">Side by side</span><h2>Every metric, this period vs comparison</h2></div>
+      <p class="bl-note">Click a row to light up that metric everywhere.</p></div>
+    <div class="bl-scroll">
+      <table class="bl-table" data-source="summary" data-row-key="key">
+        <thead><tr>
+          <th data-field="metric_label" scope="col">Metric</th>
+          <th data-field="current" scope="col">This period</th>
+          <th data-field="previous" scope="col">Comparison</th>
+          <th data-field="change" scope="col">Change</th>
+          <th data-field="avg" scope="col">Per day</th>
+        </tr></thead>
+        <tbody data-draw="cmp-rows"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="bl-glass bl-panel" id="monthly">
+    <div class="bl-phead"><div><span class="bl-eyebrow">Month by month</span><h2><span data-draw="metric-name">—</span> per month</h2></div>
+      <p class="bl-note">Months inside the selected period glow.</p></div>
+    <div class="bl-chart sm" data-draw="month-bars" data-source="monthly summary"></div>
+    <div class="bl-scroll">
+      <table class="bl-table" data-source="monthly" data-row-key="month">
+        <thead><tr>
+          <th data-field="month" scope="col">Month</th>
+          <th data-field="impressions" scope="col">Impressions</th>
+          <th data-field="views" scope="col">Views</th>
+          <th data-field="native_views" scope="col">Native views</th>
+          <th data-field="followers" scope="col">New followers</th>
+          <th data-field="shares" scope="col">Shares</th>
+          <th data-field="likes" scope="col">Likes</th>
+          <th data-field="comments" scope="col">Comments</th>
+          <th data-field="view_rate" scope="col">View rate</th>
+          <th data-field="monthly_pageviews" scope="col">Monthly page views</th>
+        </tr></thead>
+        <tbody data-draw="month-rows"></tbody>
+      </table>
+    </div>
+    <p class="bl-note">“Monthly page views” is the sheet’s month-end entry. It matches that month’s total views.</p>
+  </section>
+
+  <section class="bl-glass bl-panel" id="definitions">
+    <div class="bl-phead"><div><span class="bl-eyebrow">Glossary</span><h2>What each number means</h2></div></div>
+    <dl class="bl-defs">
+      <div><dt>Impressions</dt><dd>Times a story card was shown in the NewsBreak feed.</dd></div>
+      <div><dt>Views</dt><dd>Times a story was opened.</dd></div>
+      <div><dt>Native views</dt><dd>Views read inside the NewsBreak app, as the sheet reports them.</dd></div>
+      <div><dt>New followers</dt><dd>Followers gained each day (the sheet’s “Followers” column), added up.</dd></div>
+      <div><dt>Shares, likes, comments</dt><dd>Reader actions on the stories.</dd></div>
+      <div><dt>Engagement</dt><dd>Shares + likes + comments.</dd></div>
+      <div><dt>View rate</dt><dd>Views ÷ impressions: how often a shown card was opened.</dd></div>
+      <div><dt>Change</dt><dd>(This period − comparison) ÷ comparison. Green is up, red is down.</dd></div>
+    </dl>
+  </section>
+  <p class="bl-foot"><span id="bl-src">Loading…</span> · <button type="button" class="bl-refresh">Refresh now</button></p>
+</div>
+
+<script>
+window.BL = (() => {
+  const METRICS = [
+    { id: 'impressions', label: 'Impressions', hue: '#a78bfa' },
+    { id: 'views', label: 'Views', hue: '#38e1ff' },
+    { id: 'native_views', label: 'Native views', hue: '#2dd4bf' },
+    { id: 'followers', label: 'New followers', hue: '#fbbf24' },
+    { id: 'shares', label: 'Shares', hue: '#f472b6' },
+    { id: 'likes', label: 'Likes', hue: '#fb7185' },
+    { id: 'comments', label: 'Comments', hue: '#a3e635' },
+    { id: 'engagement', label: 'Engagement', hue: '#fb923c' },
+    { id: 'view_rate', label: 'View rate', hue: '#60a5fa', rate: true },
+  ];
+  const byId = Object.fromEntries(METRICS.map((m) => [m.id, m]));
+  const DAY = 864e5;
+  const t = (s) => Date.parse(s + 'T00:00:00Z');
+  const iso = (ms) => new Date(ms).toISOString().slice(0, 10);
+  const add = (s, n) => iso(t(s) + n * DAY);
+  const shiftYear = (s, n) => { const y = +s.slice(0, 4) + n; const md = s.slice(5); return md === '02-29' ? y + '-02-28' : y + '-' + md; };
+  const days = (a, b) => Math.round((t(b) - t(a)) / DAY) + 1;
+  const reduce = (() => { try { return matchMedia('(prefers-reduced-motion: reduce)').matches; } catch (e) { return false; } })();
+  const val = (rows, m) => {
+    if (m === 'view_rate') { const i = d3.sum(rows, (r) => r.impressions); return i ? d3.sum(rows, (r) => r.views) / i : null; }
+    if (m === 'engagement') return d3.sum(rows, (r) => r.likes + r.comments + r.shares);
+    return d3.sum(rows, (r) => r[m]);
+  };
+  const dayVal = (r, m) => m === 'engagement' ? r.likes + r.comments + r.shares : m === 'view_rate' ? (r.impressions ? r.views / r.impressions : null) : r[m];
+  const compact = new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 });
+  const fmt = (m, v) => {
+    if (v == null || !isFinite(v)) return '—';
+    if (byId[m] && byId[m].rate) return d3.format('.1%')(v);
+    return Math.abs(v) >= 10000 ? compact.format(v) : d3.format(',.0f')(v);
+  };
+  const full = (m, v) => (v == null || !isFinite(v)) ? '—' : (byId[m] && byId[m].rate ? d3.format('.2%')(v) : d3.format(',.0f')(v));
+  const chg = (v) => (v == null || !isFinite(v)) ? '—' : d3.format('+.1%')(v);
+  const chgClass = (v) => (v == null || !isFinite(v) || Math.abs(v) < 0.0005) ? 'bl-flat' : v > 0 ? 'bl-up' : 'bl-down';
+  const fDate = (s) => d3.utcFormat('%b %-d, %Y')(new Date(t(s)));
+  const fDay = (s) => d3.utcFormat('%a, %b %-d, %Y')(new Date(t(s)));
+  const fRange = (a, b) => {
+    if (!a || !b) return '—';
+    if (a === b) return fDay(a);
+    const same = a.slice(0, 4) === b.slice(0, 4);
+    return (same ? d3.utcFormat('%b %-d')(new Date(t(a))) : fDate(a)) + ' – ' + fDate(b);
+  };
+  const params = () => {
+    const p = dash.params() || {};
+    return { period: p.period || 'last7', compare: p.compare || 'prev', metric: byId[p.metric] ? p.metric : 'views', grain: p.grain || 'auto', start: p.start || null, end: p.end || null };
+  };
+  // The selected range and its comparison range. Presets come from the summary calculation; a custom range is worked out the same way here.
+  const sel = () => {
+    const p = params();
+    const c = dash.data('clean');
+    if (c.status !== 'ok' || !c.data.length) return null;
+    const rows = c.data;
+    const first = rows[0].date, last = rows[rows.length - 1].date;
+    if (p.period !== 'custom') {
+      const s = dash.data('summary');
+      if (s.status !== 'ok') return null;
+      const cmp = p.period === 'all' ? 'none' : p.compare;
+      const r = s.data.find((x) => x.key === p.period + '|' + cmp + '|views');
+      if (!r) return null;
+      return { preset: true, period: p.period, compare: cmp, start: r.start, end: r.end, pstart: r.pstart, pend: r.pend, days: r.days, first, last };
+    }
+    let a = p.start || add(last, -6), b = p.end || last;
+    if (a > b) [a, b] = [b, a];
+    if (a < first) a = first;
+    if (b > last) b = last;
+    if (a > b) a = b;
+    const n = days(a, b);
+    let ps = null, pe = null;
+    if (p.compare === 'prev') { pe = add(a, -1); ps = add(a, -n); }
+    if (p.compare === 'yoy') { ps = shiftYear(a, -1); pe = shiftYear(b, -1); }
+    if (pe && pe < first) { ps = null; pe = null; }
+    return { preset: false, period: 'custom', compare: p.compare, start: a, end: b, pstart: ps, pend: pe, days: n, first, last };
+  };
+  const pick = (a, b) => {
+    const c = dash.data('clean');
+    if (c.status !== 'ok' || !a || !b) return [];
+    return c.data.filter((r) => r.date >= a && r.date <= b);
+  };
+  const figure = (m) => {
+    const s = sel();
+    if (!s) return null;
+    if (s.preset) {
+      const r = dash.data('summary').data.find((x) => x.key === s.period + '|' + s.compare + '|' + m);
+      return r ? { ...r, marked: true } : null;
+    }
+    const cur = val(pick(s.start, s.end), m);
+    const prev = s.pstart ? val(pick(s.pstart, s.pend), m) : null;
+    return { key: null, marked: false, metric: m, metric_label: byId[m].label, current: cur, previous: prev, change: prev ? (cur - prev) / prev : null, avg: byId[m].rate ? null : cur / s.days };
+  };
+  // A value in a span (marked when it is one summary cell), counting up from what the element showed before.
+  const show = (el, m, v, field, f, fmtFn, cls) => {
+    const span = document.createElement('span');
+    if (f && f.marked && f.key) { span.dataset.source = 'summary'; span.dataset.field = field; span.dataset.where = 'key=' + encodeURIComponent(f.key); }
+    if (cls) span.className = cls;
+    const format = fmtFn || ((x) => fmt(m, x));
+    const from = typeof el._v === 'number' && isFinite(el._v) ? el._v : 0;
+    el._v = v;
+    span.textContent = format(v);
+    el.replaceChildren(span);
+    if (reduce || v == null || !isFinite(v) || from === v || document.hidden) return;
+    // The real value stays in the marked span; a ghost on top counts up to it, then goes.
+    const ghost = document.createElement('span');
+    ghost.setAttribute('aria-hidden', 'true');
+    ghost.style.cssText = 'position:absolute;white-space:nowrap;pointer-events:none;left:' + span.offsetLeft + 'px;top:' + span.offsetTop + 'px';
+    if (getComputedStyle(el).position === 'static') el.style.position = 'relative';
+    span.style.visibility = 'hidden';
+    el.appendChild(ghost);
+    const done = () => { if (ghost.isConnected) ghost.remove(); span.style.visibility = ''; };
+    const t0 = performance.now(), dur = 900;
+    const step = (now) => {
+      if (!ghost.isConnected) return;
+      const k = Math.min(1, (now - t0) / dur), e = 1 - Math.pow(1 - k, 3);
+      ghost.textContent = format(from + (v - from) * e);
+      if (k < 1) requestAnimationFrame(step); else done();
+    };
+    ghost.textContent = format(from);
+    requestAnimationFrame(step);
+    setTimeout(done, dur + 400);
+  };
+  const failLine = (el) => { const d = document.createElement('div'); d.className = 'bl-fail'; d.textContent = 'Failed to load'; el.replaceChildren(d); };
+  const failed = () => dash.data('daily').status === 'error';
+  const bucketKey = (s, g) => {
+    if (g === 'month') return s.slice(0, 7) + '-01';
+    if (g === 'week') { const d = new Date(t(s)); return add(s, -((d.getUTCDay() + 6) % 7)); }
+    return s;
+  };
+  const grainFor = (g, n) => g !== 'auto' ? g : n <= 92 ? 'day' : n <= 400 ? 'week' : 'month';
+  const buckets = (rows, g, m) => d3.groups(rows, (r) => bucketKey(r.date, g)).map(([k, rs]) => ({ key: k, from: rs[0].date, to: rs[rs.length - 1].date, value: val(rs, m) }));
+  const bucketLabel = (b, g) => g === 'month' ? d3.utcFormat('%B %Y')(new Date(t(b.key))) : g === 'week' ? 'Week of ' + fDate(b.from) : fDay(b.key);
+  const axisFmt = (m) => byId[m].rate ? d3.format('.0%') : (v) => Math.abs(v) >= 1000 ? compact.format(v) : d3.format(',')(v);
+  const tip = (el) => { const d = document.createElement('div'); d.className = 'bl-tip'; d.hidden = true; el.appendChild(d); return d; };
+  const placeTip = (box, tipEl, x, y) => {
+    tipEl.hidden = false;
+    const w = tipEl.offsetWidth, h = tipEl.offsetHeight, W = box.clientWidth;
+    let left = x + 14; if (left + w > W) left = x - w - 14; if (left < 0) left = 0;
+    let top = y - h - 10; if (top < 0) top = y + 14;
+    tipEl.style.left = left + 'px'; tipEl.style.top = top + 'px';
+  };
+  const tipRow = (color, label, value) => {
+    const r = document.createElement('div'); r.className = 'r';
+    if (color) { const s = document.createElement('span'); s.className = 'sw'; s.style.background = color; r.appendChild(s); }
+    const a = document.createElement('span'); a.textContent = label; r.appendChild(a);
+    const b = document.createElement('b'); b.textContent = value; r.appendChild(b);
+    return r;
+  };
+  const tipDate = (text) => { const d = document.createElement('div'); d.className = 'd'; d.textContent = text; return d; };
+  const leftMargin = (svg, scale, f, ticks) => {
+    const g = svg.append('g').attr('font-size', 11);
+    let w = 0;
+    scale.ticks(ticks).forEach((v) => { const tx = g.append('text').text(f(v)); w = Math.max(w, tx.node().getComputedTextLength()); });
+    g.remove();
+    return Math.ceil(w) + 12;
+  };
+  // Animate a drawing only when what it shows changed, not on a resize.
+  const fresh = (el, key) => { const changed = el._k !== key; el._k = key; return changed && !reduce; };
+  return { METRICS, byId, val, dayVal, fmt, full, chg, chgClass, fDate, fDay, fRange, params, sel, pick, figure, show, failLine, failed, grainFor, buckets, bucketLabel, axisFmt, tip, placeTip, tipRow, tipDate, leftMargin, fresh, t, add, days, reduce };
+})();
+</script>
+
+<script>
+dash.calc('clean', {
+  inputs: ['daily'],
+  title: 'Daily rows, cleaned',
+  description: 'The Daily sheet with dates read as YYYY-MM-DD, numbers read without commas, blank rows dropped.',
+  fn: (daily) => {
+    const key = (k) => String(k).trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+    const num = (v) => { if (v == null) return null; const s = String(v).replace(/[,$\s]/g, ''); if (s === '') return null; const n = Number(s); return isFinite(n) ? n : null; };
+    const rows = daily.map((r) => Object.fromEntries(Object.entries(r).map(([k, v]) => [key(k), v])));
+    const pad = (n) => String(n).padStart(2, '0');
+    const slash = rows.map((r) => String(r.date ?? '').trim().match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2,4})/)).filter(Boolean);
+    const dayFirst = slash.some((m) => +m[1] > 12);
+    const toIso = (s) => {
+      let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+      if (m) return m[1] + '-' + pad(m[2]) + '-' + pad(m[3]);
+      m = s.match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2,4})/);
+      if (m) {
+        let y = +m[3]; if (y < 100) y += 2000;
+        const dd = dayFirst ? +m[1] : +m[2], mm = dayFirst ? +m[2] : +m[1];
+        if (mm < 1 || mm > 12 || dd < 1 || dd > 31) return null;
+        return y + '-' + pad(mm) + '-' + pad(dd);
+      }
+      if (/^\d{5}(\.\d+)?$/.test(s)) return new Date(Date.UTC(1899, 11, 30) + Math.floor(+s) * 864e5).toISOString().slice(0, 10);
+      const ms = Date.parse(s + ' UTC');
+      return isNaN(ms) ? null : new Date(ms).toISOString().slice(0, 10);
+    };
+    const out = new Map();
+    for (const r of rows) {
+      const date = toIso(String(r.date ?? '').trim());
+      if (!date) continue;
+      out.set(date, {
+        date,
+        impressions: num(r.impressions) ?? 0,
+        views: num(r.views) ?? 0,
+        native_views: num(r.native_views) ?? 0,
+        followers: num(r.followers) ?? 0,
+        shares: num(r.shares) ?? 0,
+        likes: num(r.likes) ?? 0,
+        comments: num(r.comments) ?? 0,
+        monthly_pageviews: num(r.total_monthly_page_views),
+      });
+    }
+    return [...out.values()].sort((a, b) => (a.date < b.date ? -1 : 1));
+  },
+});
+
+dash.calc('summary', {
+  inputs: ['clean'],
+  title: 'Totals by period',
+  description: 'Each metric added up for every period button, with the comparison period and the change. Periods end on the latest date in the sheet.',
+  fn: (clean) => {
+    if (!clean.length) return [];
+    const DAY = 864e5;
+    const t = (s) => Date.parse(s + 'T00:00:00Z');
+    const iso = (ms) => new Date(ms).toISOString().slice(0, 10);
+    const add = (s, n) => iso(t(s) + n * DAY);
+    const yr = (s, n) => { const y = +s.slice(0, 4) + n; const md = s.slice(5); return md === '02-29' ? y + '-02-28' : y + '-' + md; };
+    const first = clean[0].date, L = clean[clean.length - 1].date;
+    const mStart = L.slice(0, 8) + '01';
+    const pmEnd = add(mStart, -1), pmStart = pmEnd.slice(0, 8) + '01';
+    const ppmEnd = add(pmStart, -1), ppmStart = ppmEnd.slice(0, 8) + '01';
+    const last = (n) => [add(L, -(n - 1)), L];
+    const P = { latest: last(1), last2: last(2), last7: last(7), last14: last(14), last30: last(30), last90: last(90), mtd: [mStart, L], lastmonth: [pmStart, pmEnd], ytd: [L.slice(0, 4) + '-01-01', L], all: [first, L] };
+    const M = [['impressions', 'Impressions'], ['views', 'Views'], ['native_views', 'Native views'], ['followers', 'New followers'], ['shares', 'Shares'], ['likes', 'Likes'], ['comments', 'Comments'], ['engagement', 'Engagement'], ['view_rate', 'View rate']];
+    const sum = (rows, f) => rows.reduce((a, r) => a + f(r), 0);
+    const val = (rows, m) => {
+      if (m === 'view_rate') { const i = sum(rows, (r) => r.impressions); return i ? sum(rows, (r) => r.views) / i : null; }
+      if (m === 'engagement') return sum(rows, (r) => r.likes + r.comments + r.shares);
+      return sum(rows, (r) => r[m]);
+    };
+    const pick = (a, b) => clean.filter((r) => r.date >= a && r.date <= b);
+    const out = [];
+    for (const [p, [s, e]] of Object.entries(P)) {
+      const days = Math.round((t(e) - t(s)) / DAY) + 1;
+      for (const c of p === 'all' ? ['none'] : ['prev', 'yoy', 'none']) {
+        let ps = null, pe = null;
+        if (c === 'prev') {
+          if (p === 'mtd') { ps = pmStart; pe = add(pmStart, days - 1); if (pe > pmEnd) pe = pmEnd; }
+          else if (p === 'lastmonth') { ps = ppmStart; pe = ppmEnd; }
+          else if (p === 'ytd') { ps = yr(s, -1); pe = yr(e, -1); }
+          else { pe = add(s, -1); ps = add(s, -days); }
+        }
+        if (c === 'yoy') { ps = yr(s, -1); pe = yr(e, -1); }
+        if (pe && pe < first) { ps = null; pe = null; }
+        const cur = pick(s, e), prev = ps ? pick(ps, pe) : null;
+        for (const [m, label] of M) {
+          const current = val(cur, m);
+          const previous = prev ? val(prev, m) : null;
+          out.push({
+            key: p + '|' + c + '|' + m, period: p, compare: c, metric: m, metric_label: label,
+            start: s, end: e, pstart: ps, pend: pe, days,
+            current, previous,
+            change: previous ? (current - previous) / previous : null,
+            avg: m === 'view_rate' ? null : current / days,
+          });
+        }
+      }
+    }
+    return out;
+  },
+});
+
+dash.calc('monthly', {
+  inputs: ['clean'],
+  title: 'Totals by month',
+  description: 'Each metric added up per calendar month, with the month’s page views from the sheet.',
+  fn: (clean) => {
+    const by = new Map();
+    for (const r of clean) {
+      const k = r.date.slice(0, 7);
+      if (!by.has(k)) by.set(k, { month: k, days: 0, impressions: 0, views: 0, native_views: 0, followers: 0, shares: 0, likes: 0, comments: 0, monthly_pageviews: null });
+      const o = by.get(k);
+      o.days += 1;
+      for (const f of ['impressions', 'views', 'native_views', 'followers', 'shares', 'likes', 'comments']) o[f] += r[f];
+      if (r.monthly_pageviews != null) o.monthly_pageviews = r.monthly_pageviews;
+    }
+    return [...by.values()].map((o) => {
+      const [y, m] = o.month.split('-').map(Number);
+      const inMonth = new Date(Date.UTC(y, m, 0)).getUTCDate();
+      return { ...o, month_days: inMonth, engagement: o.likes + o.comments + o.shares, view_rate: o.impressions ? o.views / o.impressions : null };
+    });
+  },
+});
+</script>
+
+<script>
+(() => {
+  document.querySelectorAll('[data-period]').forEach((b) => b.addEventListener('click', () => {
+    const v = b.dataset.period;
+    const patch = { period: v };
+    if (v === 'custom' && !dash.params().start) { const s = BL.sel(); if (s) { patch.start = s.start; patch.end = s.end; } }
+    dash.setParams(patch);
+  }));
+  document.querySelectorAll('[data-compare]').forEach((b) => b.addEventListener('click', () => dash.setParams({ compare: b.dataset.compare })));
+  document.querySelectorAll('[data-grain]').forEach((b) => b.addEventListener('click', () => dash.setParams({ grain: b.dataset.grain })));
+  document.querySelectorAll('.bl-tile[data-metric]').forEach((b) => b.addEventListener('click', () => dash.setParams({ metric: b.dataset.metric })));
+  document.querySelectorAll('.bl-reset').forEach((b) => b.addEventListener('click', () => dash.resetParams()));
+  const dateInputs = [['#bl-start', 'start'], ['#bl-end', 'end']];
+  dateInputs.forEach(([q, name]) => document.querySelectorAll(q).forEach((inp) => {
+    inp.addEventListener('change', () => { if (inp.value && inp.validity.valid) dash.setParams({ [name]: inp.value, period: 'custom' }); });
+    inp.addEventListener('blur', () => { const s = BL.sel(); if (s) inp.value = name === 'start' ? s.start : s.end; });
+  }));
+  const slide = (seg) => {
+    const on = seg.querySelector('button.is-on');
+    seg.querySelectorAll('.bl-ind').forEach((ind) => {
+      if (!on) { ind.style.width = '0px'; return; }
+      ind.style.left = on.offsetLeft + 'px';
+      ind.style.width = on.offsetWidth + 'px';
+    });
+  };
+  const toggle = (sel, attr, value) => document.querySelectorAll(sel).forEach((b) => {
+    const on = b.dataset[attr] === value; b.classList.toggle('is-on', on); b.setAttribute('aria-pressed', String(on));
+  });
+  dash.onData(() => {
+    const p = BL.params();
+    const s = BL.sel();
+    toggle('[data-period]', 'period', p.period);
+    toggle('[data-compare]', 'compare', p.period === 'all' ? 'none' : p.compare);
+    toggle('[data-grain]', 'grain', p.grain);
+    toggle('.bl-tile[data-metric]', 'metric', p.metric);
+    document.querySelectorAll('[data-compare]').forEach((b) => { b.disabled = p.period === 'all'; });
+    document.querySelectorAll('.bl').forEach((root) => { root.style.setProperty('--hue', BL.byId[p.metric].hue); });
+    document.querySelectorAll('.bl-custom').forEach((c) => { c.hidden = p.period !== 'custom'; });
+    dateInputs.forEach(([q, name]) => document.querySelectorAll(q).forEach((inp) => {
+      if (inp !== document.activeElement && s) inp.value = name === 'start' ? s.start : s.end;
+    }));
+    const noCmp = !s || !s.pstart;
+    document.querySelectorAll('.bl-cmp-line, .t-sub').forEach((el) => { el.hidden = noCmp; });
+    requestAnimationFrame(() => document.querySelectorAll('.bl-seg').forEach(slide));
+  });
+})();
+</script>
+
+<script>
+(() => {
+  const B = BL;
+  const ready = () => dash.data('clean').status === 'ok' && dash.data('summary').status === 'ok';
+  const metric = () => B.params().metric;
+  const hue = () => B.byId[metric()].hue;
+
+  dash.draw('latest', (el) => { const c = dash.data('clean'); el.textContent = c.status === 'ok' && c.data.length ? B.fDate(c.data[c.data.length - 1].date) : '—'; });
+  dash.draw('range', (el) => { const s = B.sel(); el.textContent = s ? B.fRange(s.start, s.end) : '—'; });
+  dash.draw('range-cmp', (el) => { const s = B.sel(); el.textContent = s && s.pstart ? B.fRange(s.pstart, s.pend) : '—'; });
+  dash.draw('days', (el) => { const s = B.sel(); el.textContent = s ? d3.format(',')(s.days) : '—'; });
+  dash.draw('metric-name', (el) => { const l = B.byId[metric()].label; el.textContent = el.dataset.case === 'lower' ? l.toLowerCase() : l; });
+  dash.draw('tk-metric', (el) => { el.textContent = B.byId[metric()].label; });
+  dash.draw('tk-val', (el) => {
+    const f = ready() ? B.figure(metric()) : null;
+    if (!f) { el.textContent = '—'; return; }
+    B.show(el, f.metric, f.current, 'current', f, (x) => B.byId[f.metric].rate ? d3.format('.2%')(x) : d3.format(',.0f')(x));
+  });
+  dash.draw('tk-chg', (el) => {
+    const f = ready() ? B.figure(metric()) : null;
+    el.className = 'bl-pill ' + (f ? B.chgClass(f.change) : 'bl-flat');
+    if (!f || f.previous == null) { el.textContent = 'No comparison'; return; }
+    B.show(el, f.metric, f.change, 'change', f, B.chg);
+  });
+  dash.draw('tk-prev', (el) => {
+    const f = ready() ? B.figure(metric()) : null;
+    if (!f || f.previous == null) { el.textContent = '—'; return; }
+    B.show(el, f.metric, f.previous, 'previous', f, (x) => B.full(f.metric, x));
+  });
+
+  dash.draw('kpi-val', (el) => {
+    const m = el.dataset.metric; const f = ready() ? B.figure(m) : null;
+    if (!f) { el.textContent = '—'; return; }
+    B.show(el, m, f.current, 'current', f);
+  });
+  dash.draw('kpi-chg', (el) => {
+    const m = el.dataset.metric; const f = ready() ? B.figure(m) : null;
+    if (!f || f.previous == null) { el.textContent = '—'; el.className = ''; return; }
+    el.className = 'bl-pill ' + B.chgClass(f.change);
+    B.show(el, m, f.change, 'change', f, B.chg);
+  });
+  dash.draw('kpi-prev', (el) => {
+    const m = el.dataset.metric; const f = ready() ? B.figure(m) : null;
+    if (!f || f.previous == null) { el.textContent = '—'; return; }
+    B.show(el, m, f.previous, 'previous', f);
+  });
+  dash.draw('kpi-avg', (el) => {
+    const m = el.dataset.metric; const f = ready() ? B.figure(m) : null;
+    if (!f || f.avg == null) { el.textContent = '—'; return; }
+    B.show(el, m, f.avg, 'avg', f);
+  });
+  dash.draw('ratio', (el) => {
+    const s = B.sel(); if (!s) { el.textContent = '—'; return; }
+    const rows = B.pick(s.start, s.end);
+    const n = B.val(rows, el.dataset.num), d = B.val(rows, el.dataset.den);
+    B.show(el, 'view_rate', d ? n / d : null, null, null, (x) => d3.format('.2%')(x));
+  });
+  dash.draw('avg-val', (el) => {
+    const f = ready() ? B.figure(metric()) : null;
+    if (!f) { el.textContent = '—'; return; }
+    const v = f.avg == null ? f.current : f.avg;
+    B.show(el, f.metric, v, f.avg == null ? 'current' : 'avg', f);
+  });
+  const bestDay = () => {
+    const s = B.sel(); if (!s) return null;
+    const m = metric();
+    let best = null;
+    for (const r of B.pick(s.start, s.end)) { const v = B.dayVal(r, m); if (v != null && (!best || v > best.v)) best = { r, v }; }
+    return best;
+  };
+  dash.draw('best-val', (el) => {
+    const b = bestDay(); if (!b) { el.textContent = '—'; return; }
+    const m = metric();
+    const span = document.createElement('span');
+    if (!B.byId[m].rate && m !== 'engagement') { span.dataset.source = 'clean'; span.dataset.field = m; span.dataset.where = 'date=' + b.r.date; }
+    span.textContent = B.full(m, b.v);
+    el.replaceChildren(span);
+  });
+  dash.draw('best-day', (el) => { const b = bestDay(); el.textContent = b ? B.fDay(b.r.date) : '—'; });
+  const NAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+  const weekdays = () => {
+    const s = B.sel(); if (!s) return null;
+    const m = metric(); const rows = B.pick(s.start, s.end);
+    return NAMES.map((nm, i) => {
+      const rs = rows.filter((r) => (new Date(B.t(r.date)).getUTCDay() + 6) % 7 === i);
+      const v = !rs.length ? null : B.byId[m].rate ? B.val(rs, m) : B.val(rs, m) / rs.length;
+      return { name: nm, short: nm.slice(0, 3), value: v, n: rs.length };
+    });
+  };
+  dash.draw('wd-best', (el) => { const w = weekdays(); const b = w && d3.greatest(w.filter((x) => x.value != null), (x) => x.value); el.textContent = b ? b.name : '—'; });
+  dash.draw('wd-note', (el) => {
+    const w = weekdays(); const b = w && d3.greatest(w.filter((x) => x.value != null), (x) => x.value);
+    el.textContent = b ? B.full(metric(), b.value) + ' on an average ' + b.name : '—';
+  });
+
+  dash.draw('kpi-spark', (el) => {
+    const m = el.dataset.metric; const s = B.sel();
+    if (!s) { el.replaceChildren(); return; }
+    const g = s.days > 120 ? 'week' : 'day';
+    const pts = B.buckets(B.pick(s.start, s.end), g, m).map((b) => b.value ?? 0);
+    const c = B.byId[m].hue;
+    const svg = d3.create('svg').attr('viewBox', '0 0 200 38').attr('preserveAspectRatio', 'none').attr('aria-hidden', 'true');
+    if (pts.length > 1) {
+      const max = d3.max(pts) || 1;
+      const x = d3.scaleLinear([0, pts.length - 1], [0, 200]), y = d3.scaleLinear([0, max], [37, 6]);
+      const id = 'sg' + m;
+      const grad = svg.append('defs').append('linearGradient').attr('id', id).attr('x1', 0).attr('x2', 0).attr('y1', 0).attr('y2', 1);
+      [[0, .45], [1, 0]].forEach(([o, a]) => grad.append('stop').attr('offset', o).attr('style', `stop-color:${c};stop-opacity:${a}`));
+      svg.append('path').attr('fill', `url(#${id})`).attr('d', d3.area().x((v, i) => x(i)).y0(38).y1(y)(pts));
+      const line = svg.append('path').attr('fill', 'none').attr('stroke', c).attr('stroke-width', 1.8).attr('vector-effect', 'non-scaling-stroke').attr('stroke-linejoin', 'round').attr('d', d3.line().x((v, i) => x(i)).y(y)(pts));
+      if (B.fresh(el, s.start + s.end)) {
+        line.attr('stroke-dasharray', '400 400').attr('stroke-dashoffset', 400).attr('pathLength', 400).transition().duration(1200).ease(d3.easeCubicOut).attr('stroke-dashoffset', 0);
+      }
+    }
+    el.replaceChildren(svg.node());
+  });
+
+  dash.draw('cmp-rows', (tb) => {
+    const s = B.sel();
+    tb.replaceChildren();
+    if (!s || !ready()) return;
+    const cur = metric();
+    for (const m of B.METRICS) {
+      const f = B.figure(m.id); if (!f) continue;
+      const tr = document.createElement('tr');
+      if (f.marked) tr.dataset.key = f.key;
+      if (m.id === cur) tr.className = 'is-on';
+      const cells = [m.label, B.full(m.id, f.current), f.previous == null ? '—' : B.full(m.id, f.previous), B.chg(f.change), f.avg == null ? '—' : B.full(m.id, f.avg)];
+      cells.forEach((txt, i) => {
+        const td = document.createElement('td');
+        if (i === 0) { const dot = document.createElement('span'); dot.style.cssText = `display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:9px;background:${m.hue};box-shadow:0 0 8px ${m.hue}`; td.appendChild(dot); }
+        td.append(txt);
+        if (i === 3) td.className = B.chgClass(f.change);
+        tr.appendChild(td);
+      });
+      tr.addEventListener('click', () => dash.setParams({ metric: m.id }));
+      tb.appendChild(tr);
+    }
+  });
+
+  dash.draw('board', (el) => {
+    const s = B.sel();
+    el.replaceChildren();
+    if (!s) return;
+    const m = metric();
+    const rows = B.pick(s.start, s.end).map((r) => ({ r, v: B.dayVal(r, m) })).filter((x) => x.v != null).sort((a, b) => b.v - a.v).slice(0, 10);
+    const raw = !B.byId[m].rate && m !== 'engagement';
+    const table = document.createElement('table');
+    if (raw) { table.dataset.source = 'clean'; table.dataset.rowKey = 'date'; }
+    const thead = table.createTHead().insertRow();
+    [['date', 'Day'], [m, B.byId[m].label]].forEach(([f, l]) => { const th = document.createElement('th'); th.scope = 'col'; if (raw) th.dataset.field = f; th.textContent = l; thead.appendChild(th); });
+    const tb = table.createTBody();
+    const max = rows.length ? rows[0].v : 1;
+    const anim = B.fresh(el, m + s.start + s.end);
+    rows.forEach(({ r, v }, i) => {
+      const tr = tb.insertRow(); tr.dataset.key = r.date;
+      const td0 = tr.insertCell();
+      const rank = document.createElement('span'); rank.className = 'bl-rank' + (i < 3 ? ' g' + (i + 1) : ''); rank.textContent = i + 1;
+      td0.append(rank, B.fDay(r.date));
+      const bar = document.createElement('div'); bar.className = 'bl-bar';
+      bar.style.width = (max ? Math.max(3, (v / max) * 100) : 0) + '%';
+      if (anim) { bar.style.width = '0%'; bar.style.transition = `width .9s cubic-bezier(.2,.8,.2,1) ${i * 50}ms`; const w = (max ? Math.max(3, (v / max) * 100) : 0) + '%'; requestAnimationFrame(() => requestAnimationFrame(() => { bar.style.width = w; })); }
+      td0.appendChild(bar);
+      const td1 = tr.insertCell(); td1.textContent = B.full(m, v);
+      tr.addEventListener('click', () => dash.setParams({ period: 'custom', start: r.date, end: r.date }));
+    });
+    el.appendChild(table);
+  });
+
+  dash.draw('month-rows', (tb) => {
+    const d = dash.data('monthly');
+    tb.replaceChildren();
+    if (d.status !== 'ok') return;
+    const cols = ['impressions', 'views', 'native_views', 'followers', 'shares', 'likes', 'comments'];
+    const max = Object.fromEntries(cols.map((c) => [c, d3.max(d.data, (r) => r[c]) || 1]));
+    const s = B.sel();
+    for (const r of d.data.slice().reverse()) {
+      const tr = document.createElement('tr'); tr.dataset.key = r.month;
+      if (s && r.month + '-31' >= s.start && r.month + '-01' <= s.end) tr.className = 'is-on';
+      const td0 = document.createElement('td');
+      td0.textContent = d3.utcFormat('%b %Y')(new Date(B.t(r.month + '-01')));
+      if (r.days < r.month_days) { const tag = document.createElement('span'); tag.className = 'bl-tag'; tag.textContent = 'partial · ' + r.days + 'd'; td0.appendChild(tag); }
+      tr.appendChild(td0);
+      cols.forEach((c) => {
+        const td = document.createElement('td'); td.textContent = d3.format(',')(r[c]);
+        const a = Math.sqrt(r[c] / max[c]) * 0.28;
+        td.style.background = `color-mix(in srgb, ${B.byId[c].hue} ${Math.round(a * 100)}%, transparent)`;
+        tr.appendChild(td);
+      });
+      const vr = document.createElement('td'); vr.textContent = r.view_rate == null ? '—' : d3.format('.2%')(r.view_rate); tr.appendChild(vr);
+      const pv = document.createElement('td'); pv.textContent = r.monthly_pageviews == null ? '—' : d3.format(',')(r.monthly_pageviews); tr.appendChild(pv);
+      tr.addEventListener('click', () => dash.setParams({ period: 'custom', start: r.month + '-01', end: r.month + '-' + String(r.month_days).padStart(2, '0') }));
+      tb.appendChild(tr);
+    }
+  });
+
+  // Glowing area/bar chart with an optional dashed comparison, drawn in when what it shows changes.
+  const drawSeries = (el, o) => {
+    const { cur, prev, m, height, label, prevLabel, highlight, color, animKey } = o;
+    el.replaceChildren();
+    const W = Math.max(280, el.clientWidth || 600), H = height;
+    const svg = d3.select(el).append('svg').attr('width', '100%').attr('viewBox', `0 0 ${W} ${H}`).attr('role', 'img');
+    const maxV = d3.max(cur.concat(prev || []), (b) => b.value ?? 0) || 1;
+    const y0 = d3.scaleLinear([0, maxV], [0, 1]).nice(5);
+    const fy = B.axisFmt(m);
+    const ml = B.leftMargin(svg, y0, fy, 5), mr = 12, mt = 14, mb = 28;
+    const y = d3.scaleLinear(y0.domain(), [H - mb, mt]);
+    const n = Math.max(cur.length, prev ? prev.length : 0);
+    const x = d3.scaleBand(d3.range(n), [ml, W - mr]).paddingInner(n > 40 ? 0.18 : 0.3).paddingOuter(0.12);
+    const cx = (i) => x(i) + x.bandwidth() / 2;
+    const asBars = n <= 62;
+    const anim = B.fresh(el, animKey);
+    const uid = Math.random().toString(36).slice(2, 8);
+    const defs = svg.append('defs');
+    const ga = defs.append('linearGradient').attr('id', 'ga' + uid).attr('x1', 0).attr('x2', 0).attr('y1', 0).attr('y2', 1);
+    [[0, .42], [.25, .24], [.5, .1], [.75, .04], [1, 0]].forEach(([of, a]) => ga.append('stop').attr('offset', of).attr('style', `stop-color:${color};stop-opacity:${a}`));
+    const gb = defs.append('linearGradient').attr('id', 'gb' + uid).attr('x1', 0).attr('x2', 0).attr('y1', 0).attr('y2', 1);
+    gb.append('stop').attr('offset', 0).attr('style', `stop-color:${color};stop-opacity:1`);
+    gb.append('stop').attr('offset', 1).attr('style', `stop-color:${color};stop-opacity:.25`);
+    const glow = defs.append('filter').attr('id', 'gl' + uid).attr('x', '-20%').attr('y', '-20%').attr('width', '140%').attr('height', '140%');
+    glow.append('feGaussianBlur').attr('stdDeviation', 4).attr('result', 'b');
+    const mg = glow.append('feMerge'); mg.append('feMergeNode').attr('in', 'b'); mg.append('feMergeNode').attr('in', 'SourceGraphic');
+    svg.append('g').selectAll('line').data(y.ticks(5)).join('line').attr('x1', ml).attr('x2', W - mr).attr('y1', (v) => y(v)).attr('y2', (v) => y(v)).attr('stroke', 'rgba(160,170,255,.09)');
+    svg.append('g').selectAll('text').data(y.ticks(5)).join('text').attr('x', ml - 10).attr('y', (v) => y(v)).attr('dy', '0.32em').attr('text-anchor', 'end').attr('font-size', 11).attr('fill', '#7c84ad').text(fy);
+    const maxLabels = Math.max(2, Math.floor((W - ml - mr) / 80));
+    const step = Math.ceil(cur.length / maxLabels);
+    svg.append('g').selectAll('text').data(cur.map((b, i) => [b, i]).filter(([, i]) => i % step === 0)).join('text')
+      .attr('x', ([, i]) => cx(i)).attr('y', H - 8).attr('text-anchor', 'middle').attr('font-size', 11).attr('fill', '#7c84ad').text(([b]) => label(b, true));
+    if (asBars) {
+      const bw = Math.min(30, x.bandwidth());
+      const bars = svg.append('g').selectAll('rect').data(cur).join('rect')
+        .attr('x', (b, i) => cx(i) - bw / 2).attr('width', bw).attr('rx', Math.min(6, bw / 2))
+        .attr('fill', (b) => highlight && !highlight(b) ? 'rgba(160,170,255,.16)' : `url(#gb${uid})`)
+        .attr('y', (b) => y(b.value ?? 0)).attr('height', (b) => Math.max(0, y(0) - y(b.value ?? 0)));
+      if (anim) bars.attr('y', y(0)).attr('height', 0).transition().duration(800).delay((b, i) => i * Math.min(25, 600 / n)).ease(d3.easeCubicOut)
+        .attr('y', (b) => y(b.value ?? 0)).attr('height', (b) => Math.max(0, y(0) - y(b.value ?? 0)));
+    } else {
+      const area = svg.append('path').datum(cur).attr('fill', `url(#ga${uid})`).attr('d', d3.area().x((b, i) => cx(i)).y0(y(0)).y1((b) => y(b.value ?? 0)));
+      const line = svg.append('path').datum(cur).attr('fill', 'none').attr('stroke', color).attr('stroke-width', 2.2).attr('stroke-linejoin', 'round').attr('stroke-linecap', 'round').attr('filter', `url(#gl${uid})`)
+        .attr('d', d3.line().x((b, i) => cx(i)).y((b) => y(b.value ?? 0)));
+      if (anim) {
+        const L = line.node().getTotalLength();
+        line.attr('stroke-dasharray', `${L} ${L}`).attr('stroke-dashoffset', L).transition().duration(1400).ease(d3.easeCubicOut).attr('stroke-dashoffset', 0).on('end', () => line.attr('stroke-dasharray', null));
+        area.attr('opacity', 0).transition().delay(300).duration(1100).attr('opacity', 1);
+      }
+      const lastI = cur.length - 1;
+      if (lastI >= 0) svg.append('circle').attr('cx', cx(lastI)).attr('cy', y(cur[lastI].value ?? 0)).attr('r', 4.5).attr('fill', color).attr('stroke', '#050816').attr('stroke-width', 2).attr('filter', `url(#gl${uid})`);
+    }
+    if (prev && prev.length) {
+      const pl = svg.append('path').datum(prev).attr('fill', 'none').attr('stroke', '#7d86b8').attr('stroke-width', 1.8).attr('stroke-dasharray', '5 5').attr('opacity', .85)
+        .attr('d', d3.line().x((b, i) => cx(i)).y((b) => y(b.value ?? 0)));
+      if (anim) pl.attr('opacity', 0).transition().delay(500).duration(900).attr('opacity', .85);
+    }
+    svg.append('line').attr('x1', ml).attr('x2', W - mr).attr('y1', H - mb).attr('y2', H - mb).attr('stroke', 'rgba(160,170,255,.25)');
+    const hover = svg.append('line').attr('y1', mt).attr('y2', H - mb).attr('stroke', color).attr('stroke-opacity', .5).attr('stroke-dasharray', '2 3').attr('opacity', 0);
+    const dot = svg.append('circle').attr('r', 5).attr('fill', color).attr('stroke', '#fff').attr('stroke-width', 1.5).attr('opacity', 0);
+    const tipEl = B.tip(el);
+    svg.append('rect').attr('x', ml).attr('y', mt).attr('width', W - ml - mr).attr('height', H - mt - mb).attr('fill', 'transparent')
+      .on('pointermove', (ev) => {
+        const [px] = d3.pointer(ev);
+        const i = Math.max(0, Math.min(n - 1, Math.floor((px - ml) / ((W - ml - mr) / n))));
+        const b = cur[i]; if (!b) { tipEl.hidden = true; return; }
+        hover.attr('x1', cx(i)).attr('x2', cx(i)).attr('opacity', 1);
+        dot.attr('cx', cx(i)).attr('cy', y(b.value ?? 0)).attr('opacity', 1);
+        tipEl.replaceChildren(B.tipDate(label(b, false)), B.tipRow(color, o.name || B.byId[m].label, B.full(m, b.value)));
+        const pb = prev && prev[i];
+        if (pb) tipEl.append(B.tipDate(prevLabel ? prevLabel(pb) : ''), B.tipRow('#7d86b8', 'Comparison', B.full(m, pb.value)));
+        const k = el.clientWidth / W;
+        B.placeTip(el, tipEl, cx(i) * k, y(b.value ?? 0) * k);
+      })
+      .on('pointerleave', () => { tipEl.hidden = true; hover.attr('opacity', 0); dot.attr('opacity', 0); });
+  };
+
+  dash.draw('trend', (el) => {
+    if (B.failed()) { B.failLine(el); return; }
+    const s = B.sel(); if (!s) { el.replaceChildren(); return; }
+    const p = B.params();
+    const g = B.grainFor(p.grain, s.days);
+    const cur = B.buckets(B.pick(s.start, s.end), g, p.metric);
+    const prev = s.pstart ? B.buckets(B.pick(s.pstart, s.pend), g, p.metric) : null;
+    const short = (b) => g === 'month' ? d3.utcFormat("%b '%y")(new Date(B.t(b.key))) : d3.utcFormat(s.days > 300 ? "%b '%y" : '%b %-d')(new Date(B.t(b.from)));
+    drawSeries(el, { cur, prev, m: p.metric, color: hue(), height: 320, animKey: [p.metric, g, s.start, s.end, s.pstart].join('|'),
+      label: (b, axis) => axis ? short(b) : B.bucketLabel(b, g), prevLabel: (b) => B.bucketLabel(b, g) });
+  });
+
+  dash.draw('month-bars', (el) => {
+    if (B.failed()) { B.failLine(el); return; }
+    const d = dash.data('monthly'); const s = B.sel();
+    if (d.status !== 'ok' || !s) { el.replaceChildren(); return; }
+    const m = metric();
+    const cur = d.data.map((r) => ({ key: r.month + '-01', from: r.month + '-01', to: r.month + '-' + String(r.month_days).padStart(2, '0'), value: r[m] }));
+    drawSeries(el, { cur, prev: null, m, color: hue(), height: 260, animKey: m, label: (b, axis) => d3.utcFormat(axis ? "%b '%y" : '%B %Y')(new Date(B.t(b.key))),
+      highlight: (b) => b.to >= s.start && b.from <= s.end });
+  });
+
+  // Calendar heatmap: one cell per day, weeks as columns.
+  dash.draw('calendar', (el) => {
+    if (B.failed()) { B.failLine(el); return; }
+    const c = dash.data('clean'); const s = B.sel();
+    if (c.status !== 'ok' || !s || !c.data.length) { el.replaceChildren(); return; }
+    const m = metric(), color = hue();
+    const rows = c.data;
+    const first = rows[0].date, last = rows[rows.length - 1].date;
+    const start = B.add(first, -((new Date(B.t(first)).getUTCDay() + 6) % 7));
+    const weeks = Math.floor(B.days(start, last) / 7) + 1;
+    const left = 34, top = 22, gap = 3;
+    const avail = Math.max(300, el.clientWidth || 700) - left - 8;
+    const cs = Math.max(10, Math.min(18, Math.floor(avail / weeks) - gap));
+    const W = left + weeks * (cs + gap) + 8, H = top + 7 * (cs + gap) + 34;
+    const vals = rows.map((r) => B.dayVal(r, m)).filter((v) => v != null && v > 0).sort(d3.ascending);
+    const hi = d3.quantileSorted(vals, 0.97) || 1;
+    const k = d3.scaleSqrt([0, hi], [0, 1]).clamp(true);
+    const ramp = d3.interpolateRgb('#141b3d', color);
+    const anim = B.fresh(el, m);
+    el.replaceChildren();
+    const svg = d3.select(el).append('svg').attr('width', W).attr('height', H).attr('role', 'img');
+    const dayNames = ['Mon', '', 'Wed', '', 'Fri', '', 'Sun'];
+    svg.append('g').selectAll('text').data(dayNames).join('text').attr('x', 0).attr('y', (d, i) => top + i * (cs + gap) + cs * .75).attr('font-size', 10).attr('fill', '#6c7499').text((d) => d);
+    const months = d3.utcMonths(new Date(B.t(start)), new Date(B.t(last) + 864e5));
+    svg.append('g').selectAll('text').data(months).join('text')
+      .attr('x', (d) => left + Math.floor((B.days(start, d.toISOString().slice(0, 10)) - 1) / 7) * (cs + gap)).attr('y', 12).attr('font-size', 10).attr('fill', '#6c7499')
+      .text((d) => d.getUTCMonth() === 0 ? d3.utcFormat("%b '%y")(d) : d3.utcFormat('%b')(d));
+    const cells = svg.append('g').selectAll('rect').data(rows).join('rect')
+      .attr('x', (r) => left + Math.floor(B.days(start, r.date) / 7) * (cs + gap) - (B.days(start, r.date) % 7 === 0 ? 0 : 0))
+      .attr('y', (r) => top + ((B.days(start, r.date) - 1) % 7) * (cs + gap))
+      .attr('width', cs).attr('height', cs).attr('rx', Math.min(4, cs / 3))
+      .attr('fill', (r) => { const v = B.dayVal(r, m); return v ? ramp(k(v)) : '#0e1430'; })
+      .attr('opacity', (r) => r.date >= s.start && r.date <= s.end ? 1 : .38)
+      .attr('stroke', (r) => r.date >= s.start && r.date <= s.end ? 'rgba(255,255,255,.35)' : 'none').attr('stroke-width', .8)
+      .style('cursor', 'pointer');
+    cells.attr('x', (r) => left + Math.floor((B.days(start, r.date) - 1) / 7) * (cs + gap));
+    if (anim) cells.attr('opacity', 0).transition().duration(500).delay((r) => Math.floor((B.days(start, r.date) - 1) / 7) * 9)
+      .attr('opacity', (r) => r.date >= s.start && r.date <= s.end ? 1 : .38);
+    const lg = svg.append('g').attr('transform', `translate(${left},${top + 7 * (cs + gap) + 14})`);
+    lg.append('text').attr('x', 0).attr('y', 9).attr('font-size', 10).attr('fill', '#6c7499').text('Less');
+    [0, .25, .5, .75, 1].forEach((v, i) => lg.append('rect').attr('x', 30 + i * (cs + 3)).attr('y', 0).attr('width', cs).attr('height', cs).attr('rx', 3).attr('fill', v ? ramp(v) : '#0e1430'));
+    lg.append('text').attr('x', 30 + 5 * (cs + 3) + 4).attr('y', 9).attr('font-size', 10).attr('fill', '#6c7499').text('More');
+    const tipEl = B.tip(el);
+    cells.on('pointerenter', (ev, r) => {
+      tipEl.replaceChildren(B.tipDate(B.fDay(r.date)), B.tipRow(color, B.byId[m].label, B.full(m, B.dayVal(r, m))));
+      const box = el.getBoundingClientRect(), rr = ev.currentTarget.getBoundingClientRect();
+      B.placeTip(el, tipEl, rr.left - box.left + el.scrollLeft + cs, rr.top - box.top);
+    }).on('pointerleave', () => { tipEl.hidden = true; })
+      .on('click', (ev, r) => dash.setParams({ period: 'custom', start: r.date, end: r.date }));
+    if (el._scrolled !== true) { el.scrollLeft = el.scrollWidth; el._scrolled = true; }
+  });
+
+  // Weekday rose: seven petals around a center that names the strongest day.
+  dash.draw('radial', (el) => {
+    if (B.failed()) { B.failLine(el); return; }
+    const w = weekdays();
+    if (!w) { el.replaceChildren(); return; }
+    const m = metric(), color = hue();
+    const size = Math.min(380, Math.max(260, el.clientWidth || 320));
+    const R = size / 2 - 34, r0 = R * 0.34;
+    const maxV = d3.max(w, (d) => d.value ?? 0) || 1;
+    const rs = d3.scaleSqrt([0, maxV], [r0 + 4, R]);
+    const best = d3.greatest(w.filter((d) => d.value != null), (d) => d.value);
+    const anim = B.fresh(el, m + JSON.stringify(B.sel() && [B.sel().start, B.sel().end]));
+    el.replaceChildren();
+    const svg = d3.select(el).append('svg').attr('width', size).attr('height', size).attr('viewBox', `${-size / 2} ${-size / 2} ${size} ${size}`).attr('role', 'img');
+    const uid = Math.random().toString(36).slice(2, 8);
+    const rg = svg.append('defs').append('radialGradient').attr('id', 'rg' + uid).attr('cx', 0).attr('cy', 0).attr('r', R).attr('gradientUnits', 'userSpaceOnUse');
+    rg.append('stop').attr('offset', r0 / R).attr('style', `stop-color:${color};stop-opacity:.15`);
+    rg.append('stop').attr('offset', 1).attr('style', `stop-color:${color};stop-opacity:.95`);
+    [0.33, 0.66, 1].forEach((f) => svg.append('circle').attr('r', r0 + (R - r0) * f).attr('fill', 'none').attr('stroke', 'rgba(160,170,255,.1)'));
+    const ang = (i) => (i / 7) * Math.PI * 2;
+    const arc = d3.arc().innerRadius(r0).padAngle(0.04).cornerRadius(6);
+    const petals = svg.append('g').selectAll('path').data(w).join('path')
+      .attr('fill', (d) => d === best ? `url(#rg${uid})` : 'rgba(160,170,255,.22)')
+      .attr('d', (d, i) => arc({ startAngle: ang(i), endAngle: ang(i + 1), outerRadius: d.value == null ? r0 + 2 : rs(d.value) }));
+    if (best) petals.filter((d) => d === best).attr('filter', null).style('filter', `drop-shadow(0 0 12px ${color})`);
+    if (anim) petals.attr('transform', 'scale(0.4)').attr('opacity', 0).transition().duration(900).delay((d, i) => i * 70).ease(d3.easeBackOut.overshoot(1.2)).attr('transform', 'scale(1)').attr('opacity', 1);
+    svg.append('g').selectAll('text').data(w).join('text')
+      .attr('x', (d, i) => Math.sin(ang(i + 0.5)) * (R + 18)).attr('y', (d, i) => -Math.cos(ang(i + 0.5)) * (R + 18)).attr('dy', '0.35em')
+      .attr('text-anchor', 'middle').attr('font-size', 11).attr('fill', (d) => d === best ? '#fff' : '#7c84ad').attr('font-weight', (d) => d === best ? 700 : 400).text((d) => d.short);
+    svg.append('text').attr('y', -6).attr('text-anchor', 'middle').attr('font-size', 18).attr('font-weight', 600).attr('fill', '#fff').text(best ? best.short : '—');
+    svg.append('text').attr('y', 14).attr('text-anchor', 'middle').attr('font-size', 11).attr('fill', '#8d95bb').text(best ? B.fmt(m, best.value) : '');
+    const tipEl = B.tip(el);
+    petals.on('pointermove', (ev, d) => {
+      tipEl.replaceChildren(B.tipDate(d.name + ' · ' + d.n + ' days'), B.tipRow(color, 'Average ' + B.byId[m].label.toLowerCase(), B.full(m, d.value)));
+      const [px, py] = d3.pointer(ev, el);
+      B.placeTip(el, tipEl, px, py);
+    }).on('pointerleave', () => { tipEl.hidden = true; });
+  });
+})();
+</script>
+
+</div>
+</body>
+</html>
