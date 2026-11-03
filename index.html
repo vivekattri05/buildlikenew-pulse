@@ -735,14 +735,14 @@ dash.calc('clean', {
     const rows = daily.map((r) => Object.fromEntries(Object.entries(r).map(([k, v]) => [key(k), v])));
     const pad = (n) => String(n).padStart(2, '0');
     const slash = rows.map((r) => String(r.date ?? '').trim().match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2,4})/)).filter(Boolean);
-    const dayFirst = slash.some((m) => +m[1] > 12);
+    const dayFirst = false; // The Sheet is in US format (month/day); a row whose first number is over 12 is read day/month.
     const toIso = (s) => {
       let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
       if (m) return m[1] + '-' + pad(m[2]) + '-' + pad(m[3]);
       m = s.match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2,4})/);
       if (m) {
         let y = +m[3]; if (y < 100) y += 2000;
-        const dd = dayFirst ? +m[1] : +m[2], mm = dayFirst ? +m[2] : +m[1];
+        const df = dayFirst || +m[1] > 12; const dd = df ? +m[1] : +m[2], mm = df ? +m[2] : +m[1];
         if (mm < 1 || mm > 12 || dd < 1 || dd > 31) return null;
         return y + '-' + pad(mm) + '-' + pad(dd);
       }
